@@ -1,0 +1,7 @@
+[2025-07-26 20:01:47] Server starting...
+[2025-07-26 20:01:47]  - Port: 8080
+[2025-07-26 20:01:47]  - Workers: 4
+[2025-07-26 20:01:47]  - Document Root: ./ssg_output
+[2025-07-26 20:01:47]  - Log File: server.log
+[2025-07-26 20:01:47] Server listening on port 8080
+[2025-07-26 20:01:47] Server shutting down.
