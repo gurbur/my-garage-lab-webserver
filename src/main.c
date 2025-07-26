@@ -11,6 +11,7 @@
 #include "server.h"
 
 #define MAX_EVENTS 64
+#define READ_BUFFER_SIZE 1024
 
 static int make_socket_non_blocking(int fd) {
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -109,10 +110,26 @@ int main() {
 
 			} else {
 				int client_fd = events[i].data.fd;
-				log_message("Event on client fd %d. Closing connection for now.", client_fd);
+
+				char buffer[READ_BUFFER_SIZE];
+				ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
+
+				if (bytes_read > 0) {
+					const char* http_response = 
+						"HTTP/1.1 200 OK\r\n"
+						"Content-Type: text/plain; charset=utf-8\r\n"
+						"Content-Length: 14\r\n"
+						"\r\n"
+						"Hello, World!";
+
+					write(client_fd, http_response, strlen(http_response));
+					log_message("Sent fixed response to fd %d", client_fd);
+				}
 
 				epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
 				close(client_fd);
+				log_message("Closed connection on fd %d", client_fd);
+
 			}
 		}
 	}
