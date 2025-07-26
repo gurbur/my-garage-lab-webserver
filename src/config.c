@@ -1,0 +1,80 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+#include "config.h"
+
+#define LINE_MAX_LEN 256
+#define KEY_MAX_LEN 64
+#define VALUE_MAX_LEN 192
+
+static void trim_whitespace(char* str) {
+	char* start = str;
+	while (isspace((unsigned char)*start)) {
+		start++;
+	}
+
+	char* end = str + strlen(str) - 1;
+	while (end > start && isspace((unsigned char)*end)) {
+		end--;
+	}
+	*(end + 1) = '\0';
+
+	if (start > str) {
+		memmove(str, start, strlen(start) + 1);
+	}
+}
+
+int load_config(const char *filename, server_config *config) {
+	FILE* file = fopen(filename, "r");
+	if (!file) {
+		perror("Error: could not open config file");
+		return -1;
+	}
+
+	config->port = 8080;
+	config->num_workers = 4;
+	config->document_root = strdup("./ssg_output");
+	config->log_file = strdup("server.log");
+
+	char sscanf_format[50];
+	sprintf(sscanf_format, "%%%d[^= ] = %%%d[^\n]", KEY_MAX_LEN - 1, VALUE_MAX_LEN - 1);
+
+	char line[LINE_MAX_LEN];
+	while (fgets(line, sizeof(line), file)) {
+		if (line[0] == '#' || line[0] == '\n') {
+			continue;
+		}
+
+		char key[KEY_MAX_LEN], value[VALUE_MAX_LEN];
+
+		if (sscanf(line, sscanf_format, key, value) == 2) {
+			trim_whitespace(key);
+			trim_whitespace(value);
+
+			if (strcmp(key, "port") == 0) {
+				config->port = atoi(value);
+			} else if (strcmp(key, "num_workers") == 0) {
+				config->num_workers = atoi(value);
+			} else if (strcmp(key, "document_root") == 0) {
+				free(config->document_root);
+				config->document_root = strdup(value);
+			} else if (strcmp(key, "log_file") == 0) {
+				free(config->log_file);
+				config->log_file = strdup(value);
+			}
+		}
+	}
+
+	fclose(file);
+	return 0;
+}
+
+void free_config(server_config *config) {
+	if (config) {
+		free(config->document_root);
+		free(config->log_file);
+	}
+}
+
