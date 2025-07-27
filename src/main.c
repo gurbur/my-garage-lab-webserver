@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #include "config.h"
 #include "logger.h"
 #include "server.h"
+#include "worker.h"
 
 int main() {
 	server_config config;
@@ -28,13 +30,22 @@ int main() {
 		return 1;
 	}
 
+	pthread_t workers[config.num_workers];
+	log_message("Creating %d worker threads...", config.num_workers);
+	for (int i = 0; i< config.num_workers; i++) {
+		// TODO: have to send pipe fd to worker
+		if (pthread_create(&workers[i], NULL, worker_thread_main, NULL) != 0) {
+			log_message("FATAL: Failed to create worker thread %d", i);
+			return 1;
+		}
+	}
+
 	log_message("Main thread is now running as an Acceptor.");
 	printf("Server is running. Press Ctrl+C to exit.\n");
 
 	while(1) {
 		struct sockaddr_in client_addr;
 		socklen_t client_len = sizeof(client_addr);
-
 		int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
 
 		if (client_fd < 0) {
@@ -46,13 +57,14 @@ int main() {
 		inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
 		log_message("Accepted new connection from %s on fd %d", client_ip, client_fd);
 
-		// TODO: send client_fd to worker thread.
-		// currently, there is no worker thread,
-		// get new connection, leave log, and close promptly.
+		// TODO: give this client_fd to worker thread using round-robin
 
 		close(client_fd);
 	}
 
+	//for (int i = 0; i < config.num_workers; i++) {
+	//pthread_join(workers[i], NULL);
+	//}
 	close(listen_fd);
 	logger_close();
 	free_config(&config);
