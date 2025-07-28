@@ -1,7 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <signal.h>
 
 #include "config.h"
 #include "logger.h"
@@ -9,6 +11,8 @@
 #include "worker.h"
 
 int main() {
+	signal(SIGPIPE, SIG_IGN);
+
 	server_config config;
 	int listen_fd;
 
@@ -31,10 +35,24 @@ int main() {
 	}
 
 	pthread_t workers[config.num_workers];
+	int pipe_fds[config.num_workers][2];
+	
 	log_message("Creating %d worker threads...", config.num_workers);
-	for (int i = 0; i< config.num_workers; i++) {
-		// TODO: have to send pipe fd to worker
-		if (pthread_create(&workers[i], NULL, worker_thread_main, NULL) != 0) {
+	for (int i = 0; i < config.num_workers; i++) {
+		if (pipe(pipe_fds[i]) == -1) {
+			log_message("FATAL: Failed to create pipe for worker %d", i);
+			return 1;
+		}
+
+		worker_init_t* init_data = malloc(sizeof(worker_init_t));
+		if (!init_data) {
+			log_message("FATAL: Failed to malloc for worker_init_t");
+			return 1;
+		}
+		init_data->worker_id = i;
+		init_data->pipe_read_fd = pipe_fds[i][0];
+		
+		if (pthread_create(&workers[i], NULL, worker_thread_main, init_data) != 0) {
 			log_message("FATAL: Failed to create worker thread %d", i);
 			return 1;
 		}
@@ -43,28 +61,26 @@ int main() {
 	log_message("Main thread is now running as an Acceptor.");
 	printf("Server is running. Press Ctrl+C to exit.\n");
 
+	int next_worker = 0;
 	while(1) {
-		struct sockaddr_in client_addr;
-		socklen_t client_len = sizeof(client_addr);
-		int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
+		int client_fd = accept(listen_fd, NULL, NULL);
 
 		if (client_fd < 0) {
 			log_message("ERROR: accept() failed in main loop");
 			continue;
 		}
 
-		char client_ip[INET_ADDRSTRLEN];
-		inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-		log_message("Accepted new connection from %s on fd %d", client_ip, client_fd);
+		int pipe_write_fd = pipe_fds[next_worker][1];
+		if (write(pipe_write_fd, &client_fd, sizeof(client_fd)) < 0) {
+			log_message("ERROR: Failed to dispatch fd %d to worker %d", client_fd, next_worker);
+			close(client_fd);
+		} else {
+			log_message("Main: Dispatched fd %d to worker %d", client_fd, next_worker);
+		}
 
-		// TODO: give this client_fd to worker thread using round-robin
-
-		close(client_fd);
+		next_worker = (next_worker + 1) % config.num_workers;
 	}
 
-	//for (int i = 0; i < config.num_workers; i++) {
-	//pthread_join(workers[i], NULL);
-	//}
 	close(listen_fd);
 	logger_close();
 	free_config(&config);
