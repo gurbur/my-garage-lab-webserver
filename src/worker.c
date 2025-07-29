@@ -10,9 +10,12 @@
 
 #include "logger.h"
 #include "worker.h"
+#include "connection.h"
+#include "timer.h"
 
 #define MAX_EVENTS 64
 #define READ_BUFFER_SIZE 1024
+#define CONNECTION_TIMEOUT 60
 
 static int make_socket_non_blocking(int fd) {
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -34,6 +37,12 @@ void* worker_thread_main(void* arg) {
 	int pipe_read_fd = init_data->pipe_read_fd;
 	free(init_data);
 
+	timer_wheel_t* tw = timer_wheel_create(60, 1);
+	if (!tw) {
+		log_message("FATAL: Worker %d: timer_wheel_create failed", worker_id);
+		return NULL;
+	}
+
 	int epoll_fd;
 	struct epoll_event event, events[MAX_EVENTS];
 
@@ -54,7 +63,7 @@ void* worker_thread_main(void* arg) {
 	log_message("Worker %d started successfully.", worker_id);
 
 	while (1) {
-		int n_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+		int n_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
 
 		if (n_events < 0) {
 			if (errno == EINTR) continue;
@@ -68,28 +77,43 @@ void* worker_thread_main(void* arg) {
 				ssize_t bytes_read = read(pipe_read_fd, &client_fd, sizeof(client_fd));
 
 				if (bytes_read == sizeof(client_fd)) {
-					log_message("Worker %d: Received new job (fd: %d)", worker_id, client_fd);
+					connection_t* conn = malloc(sizeof(connection_t));
+					if (!conn) {
+						log_message("ERROR: Worker %d: Failed to malloc for connection", worker_id);
+						close(client_fd);
+						continue;
+					}
+					conn->fd = client_fd;
+					conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
+
 					make_socket_non_blocking(client_fd);
-					event.data.fd = client_fd;
+
+					event.data.ptr = conn;
 					event.events = EPOLLIN | EPOLLET;
 					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
 						log_message("ERROR: Worker %d: epoll_ctl failed to add client fd %d", worker_id, client_fd);
+						timer_node_remove(conn->timer_node);
 						close(client_fd);
+						free(conn);
+					} else {
+						log_message("Worker %d: Received new job (fd: %d)", worker_id, client_fd);
 					}
 				} else if (bytes_read <= 0) {
 					log_message("FATAL: Worker %d: Pipe closed or error. Worker thread terminating.", worker_id);
 					close(pipe_read_fd);
 					close(epoll_fd);
+					timer_wheel_destroy(tw);
 					return NULL;
 				}
 			} else {
-				int client_fd = events[i].data.fd;
+				connection_t* conn = (connection_t*)events[i].data.ptr;
+
 				bool should_close = false;
 				bool data_read_successfully = false;
 
 				while (1) {
 					char buffer[READ_BUFFER_SIZE];
-					ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer));
+					ssize_t bytes_read = read(conn->fd, buffer, sizeof(buffer));
 
 					if (bytes_read > 0) {
 						data_read_successfully = true;
@@ -100,7 +124,7 @@ void* worker_thread_main(void* arg) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							break;
 						} else {
-							log_message("Worker %d: Error reading from fd %d", worker_id, client_fd);
+							log_message("Worker %d: Error reading from fd %d", worker_id, conn->fd);
 							should_close = true;
 							break;
 						}
@@ -108,6 +132,9 @@ void* worker_thread_main(void* arg) {
 				}
 
 				if (data_read_successfully) {
+					timer_node_remove(conn->timer_node);
+					conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
+
 					const char* http_response = 
 						"HTTP/1.1 200 OK\r\n"
 						"Content-Type: text/plain; charset=utf-8\r\n"
@@ -115,24 +142,29 @@ void* worker_thread_main(void* arg) {
 						"\r\n"
 						"Hello, World!";
 
-						if(write(client_fd, http_response, strlen(http_response)) < 0) {
-							log_message("ERROR: Worker %d: Failed to write to fd %d", worker_id, client_fd);
+						if(write(conn->fd, http_response, strlen(http_response)) < 0) {
+							log_message("ERROR: Worker %d: Failed to write to fd %d", worker_id, conn->fd);
 						} else {
-							log_message("Worker %d: Sent response to fd %d", worker_id, client_fd);
+							log_message("Worker %d: Sent response to fd %d", worker_id, conn->fd);
 						}
 						should_close = true;
 				}
 
 				if (should_close) {
-					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
-					close(client_fd);
-					log_message("Worker %d: Closed connection on fd %d", worker_id, client_fd);
+					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+					timer_node_remove(conn->timer_node);
+					close(conn->fd);
+					log_message("Worker %d: Closed connection on fd %d", worker_id, conn->fd);
+					free(conn);
 				}
 			}
 		}
+		// TODO: timer_wheel_tick logic will be here.
+
 	}
 
 	close(epoll_fd);
+	timer_wheel_destroy(tw);
 	return NULL;
 }
 
