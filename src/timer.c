@@ -47,6 +47,7 @@ timer_node_t* timer_node_add(timer_wheel_t* tw, void* conn, int timeout_sec) {
 	if(ticks_to_expire == 0) ticks_to_expire = 1;
 
 	int target_slot = (tw->current_slot + ticks_to_expire) % tw->num_slots;
+	node->slot_index = target_slot;
 
 	node->next = tw->slots[target_slot];
 	node->prev = NULL;
@@ -58,7 +59,7 @@ timer_node_t* timer_node_add(timer_wheel_t* tw, void* conn, int timeout_sec) {
 	return node;
 }
 
-void timer_node_remove(timer_node_t* node) {
+void timer_node_remove(timer_wheel_t* tw, timer_node_t* node) {
 	if (!node) return;
 
 	if (node->prev) {
@@ -66,6 +67,10 @@ void timer_node_remove(timer_node_t* node) {
 	}
 	if (node->next) {
 		node->next->prev = node->prev;
+	}
+
+	if (tw->slots[node->slot_index] == node) {
+		tw->slots[node->slot_index] = node->next;
 	}
 
 	free(node);

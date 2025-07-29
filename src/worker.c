@@ -92,7 +92,7 @@ void* worker_thread_main(void* arg) {
 					event.events = EPOLLIN | EPOLLET;
 					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
 						log_message("ERROR: Worker %d: epoll_ctl failed to add client fd %d", worker_id, client_fd);
-						timer_node_remove(conn->timer_node);
+						timer_node_remove(tw, conn->timer_node);
 						close(client_fd);
 						free(conn);
 					} else {
@@ -118,6 +118,7 @@ void* worker_thread_main(void* arg) {
 					if (bytes_read > 0) {
 						data_read_successfully = true;
 					} else if (bytes_read == 0) {
+						log_message("Worker %d: Client fd %d closed connection.", worker_id, conn->fd);
 						should_close = true;
 						break;
 					} else {
@@ -132,35 +133,48 @@ void* worker_thread_main(void* arg) {
 				}
 
 				if (data_read_successfully) {
-					timer_node_remove(conn->timer_node);
+					log_message("Worker %d: Activity on fd %d. Resetting timer", worker_id, conn->fd);
+					timer_node_remove(tw, conn->timer_node);
 					conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
 
-					const char* http_response = 
+					const char* http_response =
 						"HTTP/1.1 200 OK\r\n"
 						"Content-Type: text/plain; charset=utf-8\r\n"
 						"Content-Length: 13\r\n"
 						"\r\n"
 						"Hello, World!";
 
-						if(write(conn->fd, http_response, strlen(http_response)) < 0) {
+						if (write(conn->fd, http_response, strlen(http_response)) < 0) {
 							log_message("ERROR: Worker %d: Failed to write to fd %d", worker_id, conn->fd);
 						} else {
 							log_message("Worker %d: Sent response to fd %d", worker_id, conn->fd);
 						}
-						should_close = true;
 				}
 
 				if (should_close) {
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-					timer_node_remove(conn->timer_node);
+					if (conn->timer_node) {
+						timer_node_remove(tw, conn->timer_node);
+					}
 					close(conn->fd);
 					log_message("Worker %d: Closed connection on fd %d", worker_id, conn->fd);
 					free(conn);
 				}
 			}
 		}
-		// TODO: timer_wheel_tick logic will be here.
+		timer_node_t* expired_list = timer_wheel_tick(tw);
+		while (expired_list) {
+			timer_node_t* current_node = expired_list;
+			expired_list = expired_list->next;
 
+			connection_t* conn = (connection_t*)current_node->conn;
+			log_message("Worker %d: Closing connection on fd %d due to timeout", worker_id, conn->fd);
+
+			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+			timer_node_remove(tw, current_node);
+			close(conn->fd);
+			free(conn);
+		}
 	}
 
 	close(epoll_fd);
