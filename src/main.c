@@ -51,6 +51,7 @@ int main() {
 		}
 		init_data->worker_id = i;
 		init_data->pipe_read_fd = pipe_fds[i][0];
+		init_data->config = &config;
 		
 		if (pthread_create(&workers[i], NULL, worker_thread_main, init_data) != 0) {
 			log_message("FATAL: Failed to create worker thread %d", i);

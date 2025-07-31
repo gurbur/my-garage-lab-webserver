@@ -12,9 +12,10 @@
 #include "worker.h"
 #include "connection.h"
 #include "timer.h"
+#include "http.h"
 
 #define MAX_EVENTS 64
-#define READ_BUFFER_SIZE 1024
+#define REQUEST_BUFFER_SIZE 8192
 #define CONNECTION_TIMEOUT 60
 
 static int make_socket_non_blocking(int fd) {
@@ -35,6 +36,7 @@ void* worker_thread_main(void* arg) {
 	worker_init_t* init_data = (worker_init_t*) arg;
 	int worker_id = init_data->worker_id;
 	int pipe_read_fd = init_data->pipe_read_fd;
+	server_config* config = init_data->config;
 	free(init_data);
 
 	timer_wheel_t* tw = timer_wheel_create(60, 1);
@@ -64,7 +66,6 @@ void* worker_thread_main(void* arg) {
 
 	while (1) {
 		int n_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
-
 		if (n_events < 0) {
 			if (errno == EINTR) continue;
 			log_message("ERROR: Worker %d: epoll_wait failed", worker_id);
@@ -107,16 +108,14 @@ void* worker_thread_main(void* arg) {
 				}
 			} else {
 				connection_t* conn = (connection_t*)events[i].data.ptr;
-
 				bool should_close = false;
-				bool data_read_successfully = false;
+				char buffer[REQUEST_BUFFER_SIZE] = {0};
+				ssize_t total_bytes_read = 0;
 
-				while (1) {
-					char buffer[READ_BUFFER_SIZE];
-					ssize_t bytes_read = read(conn->fd, buffer, sizeof(buffer));
-
+				while (total_bytes_read < REQUEST_BUFFER_SIZE - 1) {
+					ssize_t bytes_read = read(conn->fd, buffer + total_bytes_read, REQUEST_BUFFER_SIZE - total_bytes_read - 1);
 					if (bytes_read > 0) {
-						data_read_successfully = true;
+						total_bytes_read += bytes_read;
 					} else if (bytes_read == 0) {
 						log_message("Worker %d: Client fd %d closed connection.", worker_id, conn->fd);
 						should_close = true;
@@ -131,26 +130,38 @@ void* worker_thread_main(void* arg) {
 						}
 					}
 				}
+				buffer[total_bytes_read] = '\0';
 
-				if (data_read_successfully) {
-					log_message("Worker %d: Activity on fd %d. Resetting timer", worker_id, conn->fd);
-					timer_node_remove(tw, conn->timer_node);
-					conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
+				if (total_bytes_read > 0) {
+					http_request_t req = {0};
+					if (parse_http_request(buffer, &req) == 0) {
+						if (strcmp(req.method, "GET") == 0) {
+							log_message("DEBUG: Calling serve_static_file for URI '%s'", req.uri);
+							int serve_result = serve_static_file(conn->fd, req.uri, config);
+							log_message("DEBUG: serve_static_file returned %d", serve_result);
 
-					const char* http_response =
-						"HTTP/1.1 200 OK\r\n"
-						"Content-Type: text/plain; charset=utf-8\r\n"
-						"Content-Length: 13\r\n"
-						"\r\n"
-						"Hello, World!";
-
-						if (write(conn->fd, http_response, strlen(http_response)) < 0) {
-							log_message("ERROR: Worker %d: Failed to write to fd %d", worker_id, conn->fd);
+							if (serve_result != 0) {
+								log_message("DEBUG: serve_result is non-zero, setting should_close=true");
+								should_close = true;
+							} else {
+								log_message("DEBUG: serve_result is 0, resetting timer.");
+								log_message("Worker %d: Activity on fd %d. Resetting timer.", worker_id, conn->fd);
+								if (conn->timer_node) {
+									timer_node_remove(tw, conn->timer_node);
+								}
+								conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
+							}
 						} else {
-							log_message("Worker %d: Sent response to fd %d", worker_id, conn->fd);
+							send_error_response(conn->fd, 405);
+							should_close = true;
 						}
+						free_http_request(&req);
+					} else {
+						send_error_response(conn->fd,400);
+						should_close = true;
+					}
 				}
-
+				
 				if (should_close) {
 					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
 					if (conn->timer_node) {
