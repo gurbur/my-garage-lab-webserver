@@ -18,6 +18,164 @@
 #define REQUEST_BUFFER_SIZE 8192
 #define CONNECTION_TIMEOUT 60
 
+typedef struct {
+	int worker_id;
+	int epoll_fd;
+	timer_wheel_t* tw;
+	server_config* config;
+} worker_context_t;
+
+static int make_socket_non_blocking(int fd);
+static void close_connection(worker_context_t* ctx, connection_t* conn);
+static void handle_client_event(worker_context_t* ctx, connection_t* conn);
+static void handle_pipe_event(worker_context_t* ctx, int pipe_read_fd);
+
+void* worker_thread_main(void* arg) {
+	worker_init_t* init_data = (worker_init_t*) arg;
+
+	worker_context_t ctx = {
+		.worker_id = init_data->worker_id,
+		.config = init_data->config
+	};
+
+	int pipe_read_fd = init_data->pipe_read_fd;
+	int pipe_write_fd = init_data->pipe_write_fd;
+	free(init_data);
+	close(pipe_write_fd);
+
+	ctx.tw = timer_wheel_create(60, 1);
+	ctx.epoll_fd = epoll_create1(0);
+	if (!ctx.tw || ctx.epoll_fd == -1) {
+		log_message("FATAL: Worker %d: timer_wheel_create failed", ctx.worker_id);
+		if (ctx.tw) timer_wheel_destroy(ctx.tw);
+		if (ctx.epoll_fd != -1) close(ctx.epoll_fd);
+		return NULL;
+	}
+
+	struct epoll_event event, events[MAX_EVENTS];
+	event.events = EPOLLIN;
+	event.data.fd = pipe_read_fd;
+	epoll_ctl(ctx.epoll_fd, EPOLL_CTL_ADD, pipe_read_fd, &event);
+
+	log_message("Worker %d started successfully.", ctx.worker_id);
+
+	while (1) {
+		int n_events = epoll_wait(ctx.epoll_fd, events, MAX_EVENTS, 1000);
+		if (n_events < 0) {
+			if (errno == EINTR) continue;
+			break;
+		}
+
+		for (int i = 0; i < n_events; i++) {
+			if (events[i].data.fd == pipe_read_fd) {
+				handle_pipe_event(&ctx, pipe_read_fd);
+			} else {
+				handle_client_event(&ctx, (connection_t*)events[i].data.ptr);
+			}
+		}
+
+		timer_node_t* expired_list = timer_wheel_tick(ctx.tw);
+		while (expired_list) {
+			timer_node_t* current_node = expired_list;
+			expired_list = expired_list->next;
+			close_connection(&ctx, (connection_t*)current_node->conn);
+			log_message("Worker %d: Closing connection due to timeout", ctx.worker_id);
+		}
+	}
+
+	log_message("Worker %d terminating.", ctx.worker_id);
+	close(pipe_read_fd);
+	close(ctx.epoll_fd);
+	timer_wheel_destroy(ctx.tw);
+	return NULL;
+}
+
+static void close_connection(worker_context_t* ctx, connection_t* conn) {
+	if (!conn) return;
+	epoll_ctl(ctx->epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
+	if (conn->timer_node) {
+		timer_node_remove(ctx->tw, conn->timer_node);
+	}
+	close(conn->fd);
+	log_message("Worker %d: Closed connection on fd %d", ctx->worker_id, conn->fd);
+	free(conn);
+}
+
+static void handle_pipe_event(worker_context_t* ctx, int pipe_read_fd) {
+	int client_fd;
+	ssize_t bytes_read = read(pipe_read_fd, &client_fd, sizeof(client_fd));
+
+	if (bytes_read == sizeof(client_fd)) {
+		connection_t* conn = malloc(sizeof(connection_t));
+		if (!conn) {
+			close(client_fd);
+			return;
+		}
+		conn->fd = client_fd;
+		conn->timer_node = timer_node_add(ctx->tw, conn, CONNECTION_TIMEOUT);
+
+		make_socket_non_blocking(client_fd);
+
+		struct epoll_event event;
+		event.data.ptr = conn;
+		event.events = EPOLLIN | EPOLLET;
+		if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+			close_connection(ctx, conn);
+		} else {
+			log_message("Worker %d: Received new job (fd: %d)", ctx->worker_id, client_fd);
+		}
+	}
+}
+
+static void handle_client_event(worker_context_t* ctx, connection_t* conn) {
+	char buffer[REQUEST_BUFFER_SIZE] = {0};
+	ssize_t total_bytes_read = 0;
+	bool should_close = false;
+
+	while (total_bytes_read < REQUEST_BUFFER_SIZE - 1) {
+		ssize_t bytes_read = read(conn->fd, buffer + total_bytes_read, REQUEST_BUFFER_SIZE - total_bytes_read - 1);
+
+		if (bytes_read > 0) {
+			total_bytes_read += bytes_read;
+		} else if (bytes_read == 0) {
+			should_close = true;
+			break;
+		} else {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				break;
+			} else {
+				should_close = true;
+				break;
+			}
+		}
+	}
+
+	if (total_bytes_read > 0) {
+		http_request_t req = {0};
+		if (parse_http_request(buffer, &req) == 0) {
+			if (strcmp(req.method, "GET") == 0) {
+				if (serve_static_file(conn->fd, req.uri, ctx->config) != 0) {
+					should_close = true;
+				} else {
+					if (conn->timer_node) timer_node_remove(ctx->tw, conn->timer_node);
+					conn->timer_node = timer_node_add(ctx->tw, conn, CONNECTION_TIMEOUT);
+				}
+			} else {
+				send_error_response(conn->fd, 405);
+				should_close = true;
+			}
+			free_http_request(&req);
+		} else {
+			send_error_response(conn->fd,400);
+			should_close = true;
+		}
+	}
+
+	if (should_close) {
+		close_connection(ctx, conn);
+	}
+}
+
 static int make_socket_non_blocking(int fd) {
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) {
@@ -31,165 +189,3 @@ static int make_socket_non_blocking(int fd) {
 	}
 	return 0;
 }
-
-void* worker_thread_main(void* arg) {
-	worker_init_t* init_data = (worker_init_t*) arg;
-	int worker_id = init_data->worker_id;
-	int pipe_read_fd = init_data->pipe_read_fd;
-	server_config* config = init_data->config;
-	free(init_data);
-
-	timer_wheel_t* tw = timer_wheel_create(60, 1);
-	if (!tw) {
-		log_message("FATAL: Worker %d: timer_wheel_create failed", worker_id);
-		return NULL;
-	}
-
-	int epoll_fd;
-	struct epoll_event event, events[MAX_EVENTS];
-
-	epoll_fd = epoll_create1(0);
-	if (epoll_fd == -1) {
-		log_message("FATAL: Worker %d: epoll_create1 failed", worker_id);
-		return NULL;
-	}
-
-	event.events = EPOLLIN;
-	event.data.fd = pipe_read_fd;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, pipe_read_fd, &event) == -1) {
-		log_message("FATAL: Worker %d: epoll_ctl failed to add pipe", worker_id);
-		close(epoll_fd);
-		return NULL;
-	}
-
-	log_message("Worker %d started successfully.", worker_id);
-
-	while (1) {
-		int n_events = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
-		if (n_events < 0) {
-			if (errno == EINTR) continue;
-			log_message("ERROR: Worker %d: epoll_wait failed", worker_id);
-			break;
-		}
-
-		for (int i = 0; i < n_events; i++) {
-			if (events[i].data.fd == pipe_read_fd) {
-				int client_fd;
-				ssize_t bytes_read = read(pipe_read_fd, &client_fd, sizeof(client_fd));
-
-				if (bytes_read == sizeof(client_fd)) {
-					connection_t* conn = malloc(sizeof(connection_t));
-					if (!conn) {
-						log_message("ERROR: Worker %d: Failed to malloc for connection", worker_id);
-						close(client_fd);
-						continue;
-					}
-					conn->fd = client_fd;
-					conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
-
-					make_socket_non_blocking(client_fd);
-
-					event.data.ptr = conn;
-					event.events = EPOLLIN | EPOLLET;
-					if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-						log_message("ERROR: Worker %d: epoll_ctl failed to add client fd %d", worker_id, client_fd);
-						timer_node_remove(tw, conn->timer_node);
-						close(client_fd);
-						free(conn);
-					} else {
-						log_message("Worker %d: Received new job (fd: %d)", worker_id, client_fd);
-					}
-				} else if (bytes_read <= 0) {
-					log_message("FATAL: Worker %d: Pipe closed or error. Worker thread terminating.", worker_id);
-					close(pipe_read_fd);
-					close(epoll_fd);
-					timer_wheel_destroy(tw);
-					return NULL;
-				}
-			} else {
-				connection_t* conn = (connection_t*)events[i].data.ptr;
-				bool should_close = false;
-				char buffer[REQUEST_BUFFER_SIZE] = {0};
-				ssize_t total_bytes_read = 0;
-
-				while (total_bytes_read < REQUEST_BUFFER_SIZE - 1) {
-					ssize_t bytes_read = read(conn->fd, buffer + total_bytes_read, REQUEST_BUFFER_SIZE - total_bytes_read - 1);
-					if (bytes_read > 0) {
-						total_bytes_read += bytes_read;
-					} else if (bytes_read == 0) {
-						log_message("Worker %d: Client fd %d closed connection.", worker_id, conn->fd);
-						should_close = true;
-						break;
-					} else {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) {
-							break;
-						} else {
-							log_message("Worker %d: Error reading from fd %d", worker_id, conn->fd);
-							should_close = true;
-							break;
-						}
-					}
-				}
-				buffer[total_bytes_read] = '\0';
-
-				if (total_bytes_read > 0) {
-					http_request_t req = {0};
-					if (parse_http_request(buffer, &req) == 0) {
-						if (strcmp(req.method, "GET") == 0) {
-							log_message("DEBUG: Calling serve_static_file for URI '%s'", req.uri);
-							int serve_result = serve_static_file(conn->fd, req.uri, config);
-							log_message("DEBUG: serve_static_file returned %d", serve_result);
-
-							if (serve_result != 0) {
-								log_message("DEBUG: serve_result is non-zero, setting should_close=true");
-								should_close = true;
-							} else {
-								log_message("DEBUG: serve_result is 0, resetting timer.");
-								log_message("Worker %d: Activity on fd %d. Resetting timer.", worker_id, conn->fd);
-								if (conn->timer_node) {
-									timer_node_remove(tw, conn->timer_node);
-								}
-								conn->timer_node = timer_node_add(tw, conn, CONNECTION_TIMEOUT);
-							}
-						} else {
-							send_error_response(conn->fd, 405);
-							should_close = true;
-						}
-						free_http_request(&req);
-					} else {
-						send_error_response(conn->fd,400);
-						should_close = true;
-					}
-				}
-				
-				if (should_close) {
-					epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-					if (conn->timer_node) {
-						timer_node_remove(tw, conn->timer_node);
-					}
-					close(conn->fd);
-					log_message("Worker %d: Closed connection on fd %d", worker_id, conn->fd);
-					free(conn);
-				}
-			}
-		}
-		timer_node_t* expired_list = timer_wheel_tick(tw);
-		while (expired_list) {
-			timer_node_t* current_node = expired_list;
-			expired_list = expired_list->next;
-
-			connection_t* conn = (connection_t*)current_node->conn;
-			log_message("Worker %d: Closing connection on fd %d due to timeout", worker_id, conn->fd);
-
-			epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->fd, NULL);
-			timer_node_remove(tw, current_node);
-			close(conn->fd);
-			free(conn);
-		}
-	}
-
-	close(epoll_fd);
-	timer_wheel_destroy(tw);
-	return NULL;
-}
-
