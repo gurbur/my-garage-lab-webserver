@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include "http.h"
 #include "logger.h"
@@ -65,14 +66,26 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 
 	if (strcmp(request_uri, "/") == 0) {
 		snprintf(filepath, sizeof(filepath), "%s/index.html", config->document_root);
-	} else {
+	} else if (strncmp(request_uri, "/images/", 8) == 0 || strncmp(request_uri, "/static/", 8) == 0) {
 		snprintf(filepath, sizeof(filepath), "%s%s", config->document_root, request_uri);
+	} else {
+		const char* last_dot = strrchr(request_uri, '.');
+		if (last_dot && (strcmp(last_dot, ".html") == 0 || strcmp(last_dot, ".css") == 0 || strcmp(last_dot, ".js") == 0)) {
+			snprintf(filepath, sizeof(filepath), "%s%s", config->document_root, request_uri);
+		} else {
+			snprintf(filepath, sizeof(filepath), "%s%s.html", config->document_root, request_uri);
+		}
 	}
 
 	struct stat file_stat;
 	if (stat(filepath, &file_stat) < 0) {
-		send_error_response(client_fd, 404);
-		log_message("DEBUG: File not found. Returning -1.");
+		if (errno == ENOENT) {
+			log_message("INFO: File not found for URI '%s', mapped to '%s'", request_uri, filepath);
+			send_error_response(client_fd, 404);
+		} else {
+			log_message("ERROR: stat error for %s: %s", filepath, strerror(errno));
+			send_error_response(client_fd, 500);
+		}
 		return -1;
 	}
 
