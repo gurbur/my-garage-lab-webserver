@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include "logger.h"
 
@@ -22,9 +23,11 @@ void log_message(const char *format, ...) {
 	}
 
 	time_t now = time(NULL);
-	struct tm* t = localtime(&now);
+	struct tm t;
 	char time_buf[20];
-	strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", t);
+
+	localtime_r(&now, &t);
+	strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &t);
 
 	fprintf(log_file, "[%s] ", time_buf);
 
@@ -41,6 +44,7 @@ void log_message(const char *format, ...) {
 void logger_close() {
 	if (log_file) {
 		fclose(log_file);
+		log_file = NULL;
 	}
 }
 
