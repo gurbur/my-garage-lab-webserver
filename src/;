@@ -28,7 +28,7 @@ typedef struct {
 static int make_socket_non_blocking(int fd);
 static void close_connection(worker_context_t* ctx, connection_t* conn);
 static void handle_client_event(worker_context_t* ctx, connection_t* conn);
-static bool handle_pipe_event(worker_context_t* ctx, int pipe_read_fd);
+static void handle_pipe_event(worker_context_t* ctx, int pipe_read_fd);
 
 void* worker_thread_main(void* arg) {
 	worker_init_t* init_data = (worker_init_t*) arg;
@@ -57,8 +57,7 @@ void* worker_thread_main(void* arg) {
 
 	log_message("Worker %d started successfully.", ctx.worker_id);
 
-	bool is_running = true;
-	while (is_running) {
+	while (1) {
 		int n_events = epoll_wait(ctx.epoll_fd, events, MAX_EVENTS, 1000);
 		if (n_events < 0) {
 			if (errno == EINTR) continue;
@@ -67,17 +66,10 @@ void* worker_thread_main(void* arg) {
 
 		for (int i = 0; i < n_events; i++) {
 			if (events[i].data.fd == pipe_read_fd) {
-				if (!handle_pipe_event(&ctx, pipe_read_fd)) {
-					is_running = false;
-					break;
-				}
+				handle_pipe_event(&ctx, pipe_read_fd);
 			} else {
 				handle_client_event(&ctx, (connection_t*)events[i].data.ptr);
 			}
-		}
-
-		if (!is_running) {
-			break;
 		}
 
 		timer_node_t* expired_list = timer_wheel_tick(ctx.tw);
@@ -115,7 +107,7 @@ static bool handle_pipe_event(worker_context_t* ctx, int pipe_read_fd) {
 		connection_t* conn = malloc(sizeof(connection_t));
 		if (!conn) {
 			close(client_fd);
-			return true;
+			return;
 		}
 		conn->fd = client_fd;
 		conn->timer_node = timer_node_add(ctx->tw, conn, CONNECTION_TIMEOUT);

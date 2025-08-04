@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/epoll.h>
 
 #include "config.h"
 #include "logger.h"
@@ -15,6 +16,7 @@
 static volatile sig_atomic_t running = 1;
 
 static void signal_handler(int signum) {
+	printf("\nCtrl+C triggered. Terminating server...\n");
 	running = 0;
 }
 
@@ -70,7 +72,6 @@ int main() {
 		}
 		init_data->worker_id = i;
 		init_data->pipe_read_fd = pipe_fds[i][0];
-		init_data->pipe_write_fd = pipe_fds[i][1];
 		init_data->config = &config;
 
 		if (pthread_create(&workers[i], NULL, worker_thread_main, init_data) != 0) {
@@ -81,33 +82,43 @@ int main() {
 		}
 	}
 
-	// read-end closing(rollback if not work correctly
-	for (int i = 0; i < config.num_workers; i++) {
-		close(pipe_fds[i][0]);
-	}
-
 	log_message("Main thread is now running as an Acceptor.");
 	printf("Server is running. Press Ctrl+C to exit.\n");
 
+	int epoll_fd = epoll_create1(0);
+	struct epoll_event event, events[1];
+
+	event.events = EPOLLIN;
+	event.data.fd = listen_fd;
+	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+
 	int next_worker = 0;
 	while(running) {
-		int client_fd = accept(listen_fd, NULL, NULL);
-		if (client_fd < 0) {
-			if (errno == EINTR && !running) break;
+		int n_events = epoll_wait(epoll_fd, events, 1, 1000);
+		if (n_events < 0) {
 			if (errno == EINTR) continue;
-			log_message("ERROR: accept() failed in main loop: %s", strerror(errno));
-			continue;
+			break;
 		}
 
-		int pipe_write_fd = pipe_fds[next_worker][1];
-		if (write(pipe_write_fd, &client_fd, sizeof(client_fd)) < 0) {
-			log_message("ERROR: Failed to dispatch fd %d to worker %d", client_fd, next_worker);
-			close(client_fd);
-		} else {
-			log_message("Main: Dispatched fd %d to worker %d", client_fd, next_worker);
-		}
+		if (n_events > 0) {
+			int client_fd = accept(listen_fd, NULL, NULL);
+			if (client_fd < 0) {
+				if (errno == EINTR && !running) break;
+				if (errno == EINTR) continue;
+				log_message("ERROR: accept() failed in main loop: %s", strerror(errno));
+				continue;
+			}
 
-		next_worker = (next_worker + 1) % config.num_workers;
+			int pipe_write_fd = pipe_fds[next_worker][1];
+			if (write(pipe_write_fd, &client_fd, sizeof(client_fd)) < 0) {
+				log_message("ERROR: Failed to dispatch fd %d to worker %d", client_fd, next_worker);
+				close(client_fd);
+			} else {
+				log_message("Main: Dispatched fd %d to worker %d", client_fd, next_worker);
+			}
+
+			next_worker = (next_worker + 1) % config.num_workers;
+		}
 	}
 
 	log_message("Server shutting down...");
@@ -122,9 +133,9 @@ int main() {
 	}
 
 	close(listen_fd);
-	logger_close();
 	free_config(&config);
 	log_message("Server shutdown complete.");
+	logger_close();
 
 	return 0;
 }
