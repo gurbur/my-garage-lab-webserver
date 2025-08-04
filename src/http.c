@@ -111,7 +111,19 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 	char buffer[4096];
 	ssize_t bytes_read;
 	while ((bytes_read = read(file_fd, buffer, sizeof(buffer))) > 0) {
-		write(client_fd, buffer, bytes_read);
+		ssize_t bytes_written = 0;
+		while (bytes_written < bytes_read) {
+			ssize_t result = write(client_fd, buffer + bytes_written, bytes_read - bytes_written);
+			if (result < 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					continue;
+				}
+				log_message("ERROR: Failed to write to socket: %s", strerror(errno));
+				close(file_fd);
+				return -1;
+			}
+			bytes_written += result;
+		}
 	}
 
 	close(file_fd);
