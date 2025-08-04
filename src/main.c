@@ -16,7 +16,7 @@
 static volatile sig_atomic_t running = 1;
 
 static void signal_handler(int signum) {
-	printf("\nCtrl+C triggered. Terminating server...\n");
+	(void)signum;
 	running = 0;
 }
 
@@ -121,6 +121,7 @@ int main() {
 		}
 	}
 
+	printf("\nCtrl+C triggered. Terminating server...\n");
 	log_message("Server shutting down...");
 
 	for (int i = 0; i < config.num_workers; i++) {
