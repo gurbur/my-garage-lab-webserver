@@ -1,5 +1,5 @@
-\<details\>
-\<summary\>🇰🇷 한국어\</summary\>
+<details>
+<summary>🇰🇷 한국어</summary>
 
 # My Garage Lab 웹 서버
 
@@ -83,7 +83,7 @@ document_root = ./ssg_output
 log_file = server.log
 ```
 
-\</details\>
+</details>
 
 # My Garage Lab Web Server
 
