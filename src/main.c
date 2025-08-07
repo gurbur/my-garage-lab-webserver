@@ -19,6 +19,7 @@
 static volatile sig_atomic_t running = 1;
 
 static void signal_handler(int signum) {
+	log_message(NULL, "Signal %d received, initiating shutdown...", signum);
 	(void)signum;
 	running = 0;
 }
