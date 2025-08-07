@@ -1,3 +1,4 @@
+#include <linux/limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,15 +78,23 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 		}
 	}
 
+	char real_filepath[PATH_MAX];
+	if (realpath(filepath, real_filepath) == NULL) {
+		log_message(NULL, "INFO: File not found for URI '%s', mapped to '%s'", request_uri, filepath);
+		send_error_response(client_fd, 404);
+		return -1;
+	}
+
+	if (strncmp(real_filepath, config->document_root, strlen(config->document_root)) != 0) {
+		log_message(NULL, "WARN: Path Traversal attempt blocked. URI: '%s', Resolved: '%s'", request_uri, real_filepath);
+		send_error_response(client_fd, 403);
+		return -1;
+	}
+
 	struct stat file_stat;
-	if (stat(filepath, &file_stat) < 0) {
-		if (errno == ENOENT) {
-			log_message("INFO: File not found for URI '%s', mapped to '%s'", request_uri, filepath);
-			send_error_response(client_fd, 404);
-		} else {
-			log_message("ERROR: stat error for %s: %s", filepath, strerror(errno));
-			send_error_response(client_fd, 500);
-		}
+	if (stat(real_filepath, &file_stat) < 0) {
+		log_message("ERROR: stat error for %s: %s", real_filepath, strerror(errno));
+		send_error_response(client_fd, 500);
 		return -1;
 	}
 
@@ -95,7 +104,7 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 		return -1;
 	}
 
-	int file_fd = open(filepath, O_RDONLY);
+	int file_fd = open(real_filepath, O_RDONLY);
 	if (file_fd < 0) {
 		send_error_response(client_fd, 403);
 		log_message("DEBUG: Permission denied. Returning -1.");
@@ -103,7 +112,7 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 	}
 
 	char header[256];
-	const char* mime_type = get_mime_type(filepath);
+	const char* mime_type = get_mime_type(real_filepath);
 
 	sprintf(header, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n\r\n", mime_type, file_stat.st_size);
 	write(client_fd, header, strlen(header));
