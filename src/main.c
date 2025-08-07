@@ -9,6 +9,8 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <linux/limits.h>
+#include <pwd.h>
+#include <grp.h>
 
 #include "config.h"
 #include "logger.h"
@@ -70,6 +72,33 @@ int main(int argc, char* argv[]) {
 		free_config(&config);
 		return 1;
 	}
+
+	const char* drop_user = "www-data";
+	struct passwd* pw = getpwnam(drop_user);
+	if (pw == NULL) {
+		log_message(NULL, "FATAL: Could not find user '%s' to drop privileges.", drop_user);
+		close(listen_fd);
+		logger_close();
+		free_config(&config);
+		return 1;
+	}
+
+	if (setgid(pw->pw_gid) != 0) {
+		log_message(NULL, "FATAL: setgid failed: %s", strerror(errno));
+		close(listen_fd);
+		logger_close();
+		free_config(&config);
+		return 1;
+	}
+	if (setuid(pw->pw_uid) != 0) {
+		log_message(NULL, "FATAL: setuid failed: %s", strerror(errno));
+		close(listen_fd);
+		logger_close();
+		free_config(&config);
+		return 1;
+	}
+
+	log_message(NULL, "Successfully dropped privileges to user '%s'.", drop_user);
 
 	pthread_t workers[config.num_workers];
 	int pipe_fds[config.num_workers][2];
