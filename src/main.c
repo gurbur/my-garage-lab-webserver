@@ -23,7 +23,12 @@ static void signal_handler(int signum) {
 	running = 0;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+	int is_daemon_mode = 0;
+	if (argc > 1 && strcmp(argv[1], "-d") == 0) {
+		is_daemon_mode = 1;
+	}
+
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 	signal(SIGPIPE, SIG_IGN);
@@ -102,8 +107,9 @@ int main() {
 	}
 
 	log_message(NULL, "Main thread is now running as an Acceptor.");
-	printf("Server is running. Press Ctrl+C to exit.\n");
-
+	if (!is_daemon_mode) {
+		printf("Server is running. Press Ctrl+C to exit.\n");
+	}
 	struct sockaddr_storage client_addr;
 	socklen_t addr_len = sizeof(client_addr);
 
@@ -158,8 +164,9 @@ int main() {
 			next_worker = (next_worker + 1) % config.num_workers;
 		}
 	}
-
-	printf("\nCtrl+C triggered. Terminating server...\n");
+	if (!is_daemon_mode) {
+		printf("\nCtrl+C triggered. Terminating server...\n");
+	}
 	log_message(NULL, "Server shutting down...");
 
 	for (int i = 0; i < config.num_workers; i++) {

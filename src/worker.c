@@ -126,7 +126,7 @@ static bool handle_pipe_event(worker_context_t* ctx, int pipe_read_fd) {
 		}
 		return true;
 	} else if (bytes_read <= 0) {
-		log_message(conn->client_ip, "Worker %d: Pipe closed or error. Shutting down.", ctx->worker_id);
+		log_message(NULL, "Worker %d: Pipe closed or error. Shutting down.", ctx->worker_id);
 		return false;
 	}
 	return true;
