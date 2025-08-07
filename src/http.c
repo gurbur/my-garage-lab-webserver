@@ -57,7 +57,14 @@ void send_error_response(int client_fd, int status_code) {
 
 	sprintf(body, "<html><body><h1>%d %s</h1></body></html>", status_code, status_message);
 
-	sprintf(response, "HTTP/1.1 %d %s\r\nContent-Type: text/html\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n%s", status_code, status_message, strlen(body), body);
+	sprintf(response,
+			"HTTP/1.1 %d %s\r\n"
+			"Content-Type: text/html\r\n"
+			"Content-Length: %ld\r\n"
+			"X-Content-Type-Options: nosniff\r\n"
+			"X-Frame-Options: DENY\r\n"
+			"Connection: close\r\n\r\n%s",
+			status_code, status_message, strlen(body), body);
 
 	write(client_fd, response, strlen(response));
 }
@@ -114,7 +121,15 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 	char header[256];
 	const char* mime_type = get_mime_type(real_filepath);
 
-	sprintf(header, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n\r\n", mime_type, file_stat.st_size);
+	sprintf(header,
+			"HTTP/1.1 200 OK\r\n"
+			"Content-Type: %s\r\n"
+			"Content-Length: %ld\r\n"
+			"X-Content-Type-Options: nosniff\r\n"
+			"X-Frame-Options: DENY\r\n"
+			"Connection: keep-alive\r\n\r\n",
+			mime_type, file_stat.st_size);
+
 	write(client_fd, header, strlen(header));
 
 	char buffer[4096];
