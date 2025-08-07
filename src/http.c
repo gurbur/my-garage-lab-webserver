@@ -45,7 +45,7 @@ void free_http_request(http_request_t *req) {
 void send_error_response(int client_fd, int status_code) {
 	const char* status_message;
 	char body[128];
-	char response[256];
+	char response[512];
 
 	switch (status_code) {
 		case 400: status_message = "Bad Request"; break;
@@ -57,7 +57,7 @@ void send_error_response(int client_fd, int status_code) {
 
 	sprintf(body, "<html><body><h1>%d %s</h1></body></html>", status_code, status_message);
 
-	sprintf(response,
+	snprintf(response, sizeof(response),
 			"HTTP/1.1 %d %s\r\n"
 			"Content-Type: text/html\r\n"
 			"Content-Length: %ld\r\n"
@@ -100,28 +100,28 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 
 	struct stat file_stat;
 	if (stat(real_filepath, &file_stat) < 0) {
-		log_message("ERROR: stat error for %s: %s", real_filepath, strerror(errno));
+		log_message(NULL, "ERROR: stat error for %s: %s", real_filepath, strerror(errno));
 		send_error_response(client_fd, 500);
 		return -1;
 	}
 
 	if (!S_ISREG(file_stat.st_mode)) {
 		send_error_response(client_fd, 403);;
-		log_message("DEBUG: Not a regular file. Returning -1.");
+		log_message(NULL, "DEBUG: Not a regular file. Returning -1.");
 		return -1;
 	}
 
 	int file_fd = open(real_filepath, O_RDONLY);
 	if (file_fd < 0) {
 		send_error_response(client_fd, 403);
-		log_message("DEBUG: Permission denied. Returning -1.");
+		log_message(NULL, "DEBUG: Permission denied. Returning -1.");
 		return -1;
 	}
 
-	char header[256];
+	char header[512];
 	const char* mime_type = get_mime_type(real_filepath);
 
-	sprintf(header,
+	snprintf(header, sizeof(header),
 			"HTTP/1.1 200 OK\r\n"
 			"Content-Type: %s\r\n"
 			"Content-Length: %ld\r\n"
@@ -142,7 +142,7 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 				if (errno == EAGAIN || errno == EWOULDBLOCK) {
 					continue;
 				}
-				log_message("ERROR: Failed to write to socket: %s", strerror(errno));
+				log_message(NULL, "ERROR: Failed to write to socket: %s", strerror(errno));
 				close(file_fd);
 				return -1;
 			}
@@ -151,7 +151,7 @@ int serve_static_file(int client_fd, const char *request_uri, server_config *con
 	}
 
 	close(file_fd);
-	log_message("DEBUG: File sent successfully. Returning 0.");
+	log_message(NULL, "DEBUG: File sent successfully. Returning 0.");
 	return 0;
 }
 

@@ -44,7 +44,7 @@ void* worker_thread_main(void* arg) {
 	ctx.tw = timer_wheel_create(60, 1);
 	ctx.epoll_fd = epoll_create1(0);
 	if (!ctx.tw || ctx.epoll_fd == -1) {
-		log_message("FATAL: Worker %d: timer_wheel_create failed", ctx.worker_id);
+		log_message(NULL, "FATAL: Worker %d: timer_wheel_create failed", ctx.worker_id);
 		if (ctx.tw) timer_wheel_destroy(ctx.tw);
 		if (ctx.epoll_fd != -1) close(ctx.epoll_fd);
 		return NULL;
@@ -55,7 +55,7 @@ void* worker_thread_main(void* arg) {
 	event.data.fd = pipe_read_fd;
 	epoll_ctl(ctx.epoll_fd, EPOLL_CTL_ADD, pipe_read_fd, &event);
 
-	log_message("Worker %d started successfully.", ctx.worker_id);
+	log_message(NULL, "Worker %d started successfully.", ctx.worker_id);
 
 	bool is_running = true;
 	while (is_running) {
@@ -84,12 +84,12 @@ void* worker_thread_main(void* arg) {
 		while (expired_list) {
 			timer_node_t* current_node = expired_list;
 			expired_list = expired_list->next;
+			log_message(((connection_t*)current_node->conn)->client_ip, "Worker %d: Closing connection due to timeout", ctx.worker_id);
 			close_connection(&ctx, (connection_t*)current_node->conn);
-			log_message("Worker %d: Closing connection due to timeout", ctx.worker_id);
 		}
 	}
 
-	log_message("Worker %d terminating.", ctx.worker_id);
+	log_message(NULL, "Worker %d terminating.", ctx.worker_id);
 	close(pipe_read_fd);
 	close(ctx.epoll_fd);
 	timer_wheel_destroy(ctx.tw);
@@ -103,36 +103,30 @@ static void close_connection(worker_context_t* ctx, connection_t* conn) {
 		timer_node_remove(ctx->tw, conn->timer_node);
 	}
 	close(conn->fd);
-	log_message("Worker %d: Closed connection on fd %d", ctx->worker_id, conn->fd);
+	log_message(conn->client_ip, "Worker %d: Closed connection on fd %d", ctx->worker_id, conn->fd);
 	free(conn);
 }
 
 static bool handle_pipe_event(worker_context_t* ctx, int pipe_read_fd) {
-	int client_fd;
-	ssize_t bytes_read = read(pipe_read_fd, &client_fd, sizeof(client_fd));
+	connection_t* conn;
+	ssize_t bytes_read = read(pipe_read_fd, &conn, sizeof(connection_t*));
 
-	if (bytes_read == sizeof(client_fd)) {
-		connection_t* conn = malloc(sizeof(connection_t));
-		if (!conn) {
-			close(client_fd);
-			return true;
-		}
-		conn->fd = client_fd;
+	if (bytes_read == sizeof(connection_t*)) {
 		conn->timer_node = timer_node_add(ctx->tw, conn, CONNECTION_TIMEOUT);
 
-		make_socket_non_blocking(client_fd);
+		make_socket_non_blocking(conn->fd);
 
 		struct epoll_event event;
 		event.data.ptr = conn;
 		event.events = EPOLLIN | EPOLLET;
-		if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+		if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, conn->fd, &event) == -1) {
 			close_connection(ctx, conn);
 		} else {
-			log_message("Worker %d: Received new job (fd: %d)", ctx->worker_id, client_fd);
+			log_message(conn->client_ip, "Worker %d: Received new job (fd: %d)", ctx->worker_id, conn->fd);
 		}
 		return true;
 	} else if (bytes_read <= 0) {
-		log_message("Worker %d: Pipe closed or error. Shutting down.", ctx->worker_id);
+		log_message(conn->client_ip, "Worker %d: Pipe closed or error. Shutting down.", ctx->worker_id);
 		return false;
 	}
 	return true;
@@ -190,12 +184,12 @@ static void handle_client_event(worker_context_t* ctx, connection_t* conn) {
 static int make_socket_non_blocking(int fd) {
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) {
-		log_message("ERROR: fcntl(F_GETFL) failed");
+		log_message(NULL, "ERROR: fcntl(F_GETFL) failed");
 		return -1;
 	}
 	flags |= O_NONBLOCK;
 	if (fcntl(fd, F_SETFL, flags) == -1) {
-		log_message("ERROR: fcntl(F_SETFL) failed");
+		log_message(NULL, "ERROR: fcntl(F_SETFL) failed");
 		return -1;
 	}
 	return 0;

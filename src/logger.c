@@ -16,7 +16,7 @@ int logger_init(const char* filename) {
 	return 0;
 }
 
-void log_message(const char *format, ...) {
+void log_message(const char* client_ip, const char *format, ...) {
 	if (!log_file) {
 		fprintf(stderr, "Logger not initialized.\n");
 		return;
@@ -30,6 +30,9 @@ void log_message(const char *format, ...) {
 	strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &t);
 
 	fprintf(log_file, "[%s] ", time_buf);
+	if (client_ip) {
+		fprintf(log_file, "[%s] ", client_ip);
+	}
 
 	va_list args;
 	va_start(args, format);
