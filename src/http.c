@@ -17,6 +17,7 @@ static const char* get_mime_type(const char* filename) {
 	if (strstr(filename, ".png")) return "image/png";
 	if (strstr(filename, ".jpg")) return "image/jpeg";
 	if (strstr(filename, ".gif")) return "image/gif";
+	if (strstr(filename, ".xml")) return "application/xml";
 	return "application/octet-stream";
 }
 
@@ -72,7 +73,11 @@ void send_error_response(int client_fd, int status_code) {
 int serve_static_file(int client_fd, const char *request_uri, server_config *config) {
 	char filepath[256];
 
-	if (strcmp(request_uri, "/") == 0) {
+	if (strcmp(request_uri, "/sitemap.xml") == 0) {
+		snprintf(filepath, sizeof(filepath), "%s/sitemap.xml", config->document_root);
+	} else if (strcmp(request_uri, "/rss.xml") == 0) {
+		snprintf(filepath, sizeof(filepath), "%s/rss.xml", config->document_root);
+	} else if (strcmp(request_uri, "/") == 0) {
 		snprintf(filepath, sizeof(filepath), "%s/index.html", config->document_root);
 	} else if (strncmp(request_uri, "/images/", 8) == 0 || strncmp(request_uri, "/static/", 8) == 0) {
 		snprintf(filepath, sizeof(filepath), "%s%s", config->document_root, request_uri);
